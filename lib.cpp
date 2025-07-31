@@ -61,9 +61,6 @@ void render() {
     _injectedRenderContext.copyBackbufferToTexture();
 
     // Set up a simple orthographic projection for 2D rendering
-    glPushAttrib(GL_ALL_ATTRIB_BITS);
-    glPushMatrix();
-
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
