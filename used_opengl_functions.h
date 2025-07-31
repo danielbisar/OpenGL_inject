@@ -3,7 +3,10 @@
 
 #include <stdio.h>
 #include <GL/gl.h>
+#include <GL/glx.h>
 #include <dlfcn.h>
+
+static bool used_opengl_functions_loaded = false;
 
 typedef void (*glAttachShader_t)(GLuint program, GLuint shader);
 static glAttachShader_t glAttachShader = NULL;
@@ -38,7 +41,11 @@ static glShaderSource_t glShaderSource = NULL;
 typedef void (*glUseProgram_t)(GLuint program);
 static glUseProgram_t glUseProgram = NULL;
 
-#define LOAD_FUNCTION(target, name, type) \
+typedef void (*glXSwapBuffers_t)(Display *display, GLXDrawable drawable);
+static glXSwapBuffers_t glXSwapBuffers_original = NULL;
+
+
+#define LOAD_GL_FUNCTION(target, name, type) \
     {\
         printf("Load " name ": "); \
         target = (type)dlsym(RTLD_NEXT, name); \
@@ -49,19 +56,34 @@ static glUseProgram_t glUseProgram = NULL;
         } \
     }
 
+#define LOAD_GL_FUNCTION_ORIGINAL(target, name, type) \
+    {\
+        printf("Load original " name ": "); \
+        target = (type)dlsym(RTLD_NEXT, name); \
+        if (!target) { \
+            printf("failed\n"); \
+        } else { \
+            printf("%p\n", target); \
+        } \
+    }
+
 void assureGlFunctionsLoaded(){
-    if (!glCreateShader) {
-        LOAD_FUNCTION(glAttachShader, "glAttachShader", glAttachShader_t);
-        LOAD_FUNCTION(glCreateProgram, "glCreateProgram", glCreateProgram_t);
-        LOAD_FUNCTION(glCompileShader, "glCompileShader", glCompileShader_t);
-        LOAD_FUNCTION(glCreateShader, "glCreateShader", glCreateShader_t);
-        LOAD_FUNCTION(glGetProgramiv, "glGetProgramiv", glGetProgramiv_t);
-        LOAD_FUNCTION(glGetProgramInfoLog, "glGetProgramInfoLog", glGetProgramInfoLog_t);
-        LOAD_FUNCTION(glGetShaderiv, "glGetShaderiv", glGetShaderiv_t);
-        LOAD_FUNCTION(glGetShaderInfoLog, "glGetShaderInfoLog", glGetShaderInfoLog_t);
-        LOAD_FUNCTION(glLinkProgram, "glLinkProgram", glLinkProgram_t);
-        LOAD_FUNCTION(glShaderSource, "glShaderSource", glShaderSource_t);
-        LOAD_FUNCTION(glUseProgram, "glUseProgram", glUseProgram_t);
+    if (!used_opengl_functions_loaded) {
+        LOAD_GL_FUNCTION(glAttachShader, "glAttachShader", glAttachShader_t);
+        LOAD_GL_FUNCTION(glCreateProgram, "glCreateProgram", glCreateProgram_t);
+        LOAD_GL_FUNCTION(glCompileShader, "glCompileShader", glCompileShader_t);
+        LOAD_GL_FUNCTION(glCreateShader, "glCreateShader", glCreateShader_t);
+        LOAD_GL_FUNCTION(glGetProgramiv, "glGetProgramiv", glGetProgramiv_t);
+        LOAD_GL_FUNCTION(glGetProgramInfoLog, "glGetProgramInfoLog", glGetProgramInfoLog_t);
+        LOAD_GL_FUNCTION(glGetShaderiv, "glGetShaderiv", glGetShaderiv_t);
+        LOAD_GL_FUNCTION(glGetShaderInfoLog, "glGetShaderInfoLog", glGetShaderInfoLog_t);
+        LOAD_GL_FUNCTION(glLinkProgram, "glLinkProgram", glLinkProgram_t);
+        LOAD_GL_FUNCTION(glShaderSource, "glShaderSource", glShaderSource_t);
+        LOAD_GL_FUNCTION(glUseProgram, "glUseProgram", glUseProgram_t);
+
+        LOAD_GL_FUNCTION_ORIGINAL(glXSwapBuffers_original, "glXSwapBuffers", glXSwapBuffers_t);
+
+        used_opengl_functions_loaded = true;
     }
 }
 

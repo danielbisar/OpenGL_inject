@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 // handles loading of OpenGL functions dynamically (assureGlFunctionsLoaded)
 #include "used_opengl_functions.h"
 
@@ -43,14 +41,9 @@ void render() {
 }
 
 void glXSwapBuffers(Display* display, GLXDrawable drawable) {
-    static void (*real_glXSwapBuffers)(Display*, GLXDrawable) = NULL;
-
-    if (!real_glXSwapBuffers)
-        real_glXSwapBuffers = dlsym(RTLD_NEXT, "glXSwapBuffers");
 
     assureGlFunctionsLoaded();
     render();
 
-    // Call the real function
-    real_glXSwapBuffers(display, drawable);
+    glXSwapBuffers_original(display, drawable);
 }
