@@ -12,6 +12,9 @@ public:
     int textureWidth = 0;
     int textureHeight = 0;
     GLuint _texture = 0;
+    GLuint _fragmentShader = 0;
+    GLuint _shaderProgram = 0;
+    GLint _textureUniformInputLocation = 0;
 
     InjectedRenderContext(){
     }
@@ -55,6 +58,44 @@ public:
         glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 0, 0, viewportWidth, viewportHeight, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
+
+    void assureShader() {
+        if(_shaderProgram == 0)
+        {
+            _fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+            printf("Fragment shader created: %u\n", _fragmentShader);
+
+            const char *shaderSource = R"(
+            #version 330 core
+            out vec4 FragColor;
+            uniform sampler2D screenTexture;
+            void main() {
+                FragColor = texture(screenTexture, gl_FragCoord.xy / vec2(800, 600));
+            }
+        )";
+            glShaderSource(_fragmentShader, 1, &shaderSource, NULL);
+            glCompileShader(_fragmentShader);
+
+            GLint success;
+            glGetShaderiv(_fragmentShader, GL_COMPILE_STATUS, &success);
+            if (!success) {
+                GLchar infoLog[512];
+                glGetShaderInfoLog(_fragmentShader, 512, NULL, infoLog);
+                printf("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n%s\n", infoLog);
+            } else {
+                printf("Fragment shader compiled successfully.\n");
+            }
+
+            _shaderProgram = glCreateProgram();
+            glAttachShader(_shaderProgram, _fragmentShader);
+            glLinkProgram(_shaderProgram);
+
+            _textureUniformInputLocation = glGetUniformLocation(_shaderProgram, "screenTexture");
+            glUniform1i(_textureUniformInputLocation, 0); // Texture unit 0
+
+            glUseProgram(0);
+        }
+    }
 };
 
 static InjectedRenderContext _injectedRenderContext = InjectedRenderContext();
@@ -67,6 +108,7 @@ float top = 1.0f;    // at the very top
 void render() {
     _injectedRenderContext.readViewportInfos();
     _injectedRenderContext.saveOpenGlState();
+    _injectedRenderContext.assureShader();
 
     _injectedRenderContext.assureTexture();
     _injectedRenderContext.copyBackbufferToTexture();
@@ -86,10 +128,14 @@ void render() {
     glDisable(GL_BLEND);       // optional, if blending is undesired
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // ensure full texture color
 
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, _injectedRenderContext._texture);
+    glUseProgram(_injectedRenderContext._shaderProgram);
 
-    // Draw textured quad in the 0.2-0.8 rectangle
+    glEnable(GL_TEXTURE_2D);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, _injectedRenderContext._texture);
+    glUniform1i(_injectedRenderContext._textureUniformInputLocation, 0); // Texture unit 0
+
+
     glBegin(GL_QUADS);
         glTexCoord2f(0.0f, 0.0f); glVertex2f(left, bottom);   // bottom left
         glTexCoord2f(1.0f, 0.0f); glVertex2f(right, bottom);  // bottom right
@@ -99,6 +145,8 @@ void render() {
 
     glBindTexture(GL_TEXTURE_2D, 0);
     glDisable(GL_TEXTURE_2D);
+
+    glUseProgram(0);
 
     // Restore matrices and state
     glPopMatrix(); // MODELVIEW
