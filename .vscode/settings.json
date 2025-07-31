@@ -4,6 +4,7 @@
         "*.conf": "ini",
         "Vagrantfile": "ruby",
         "glfw3.h": "c",
-        "typeinfo": "c"
+        "typeinfo": "c",
+        "stdio.h": "c"
     }
 }
