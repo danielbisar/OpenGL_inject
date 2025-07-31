@@ -10,6 +10,11 @@ void main() {
     uv = uv - 0.7;
     uv = uv * 3.3333;
 
+    // zoom in
+    uv = uv * 0.1;
+    uv.x = uv.x + 0.2;
+    uv.y = uv.y + 0.55;
+
     //vec4 color = vec4(uv.x, uv.y, 0.0, 1.0); // Set color based on UV coordinates for testing
     //fragColor = color;
     fragColor = texture(screenTexture, uv); // Use the texture color
