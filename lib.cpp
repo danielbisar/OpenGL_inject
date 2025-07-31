@@ -1,11 +1,32 @@
 // handles loading of OpenGL functions dynamically (assureGlFunctionsLoaded)
+
+// based on: https://aixxe.net/2016/12/imgui-linux-csgo
+
 #include "used_opengl_functions.h"
 
 #include <stdio.h>
 #include <GL/gl.h>
 #include <GL/glx.h>
+#include <string>
+#include <fstream>
+#include <sstream>
 
 class InjectedRenderContext {
+private:
+    std::string loadShaderSource() {
+        std::ifstream shaderFile("fragment.shader");
+        if (!shaderFile.is_open()) {
+            printf("Failed to open fragment shader file.\n");
+            return nullptr;
+        }
+
+        std::ostringstream buffer;
+        buffer << shaderFile.rdbuf(); // Read the file's content into the buffer
+        std::string shaderCode = buffer.str(); // Convert buffer to string
+        shaderFile.close();
+
+        return shaderCode;
+    }
 public:
     int viewportWidth = 0;
     int viewportHeight = 0;
@@ -15,6 +36,7 @@ public:
     GLuint _fragmentShader = 0;
     GLuint _shaderProgram = 0;
     GLint _textureUniformInputLocation = 0;
+    clock_t _lastTextureUpdate = 0;
 
     InjectedRenderContext(){
     }
@@ -29,15 +51,33 @@ public:
 
     void assureTexture() {
         if (_texture == 0 || textureWidth != viewportWidth || textureHeight != viewportHeight) {
+
+            // reduce the frequency of texture updates
+            // to avoid performance issues with frequent texture recreation (complete hangs)
+            if(_lastTextureUpdate == 0)
+                _lastTextureUpdate = clock();
+            else if (clock() - _lastTextureUpdate < CLOCKS_PER_SEC / 2) {
+                //printf("Skipping texture update, last update was too recent.\n");
+                return;
+            }
+
+            _lastTextureUpdate = clock();
+
             if(_texture != 0) {
+                glBindTexture(GL_TEXTURE_2D, 0);
                 glDeleteTextures(1, &_texture);
             }
+
+            printf("Creating texture with size %dx%d\n", viewportWidth, viewportHeight);
 
             glGenTextures(1, &_texture);
             glBindTexture(GL_TEXTURE_2D, _texture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, viewportWidth, viewportHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+
+            textureWidth = viewportWidth;
+            textureHeight = viewportHeight;
 
             glBindTexture(GL_TEXTURE_2D, 0);
         }
@@ -65,15 +105,9 @@ public:
             _fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
             printf("Fragment shader created: %u\n", _fragmentShader);
 
-            const char *shaderSource = R"(
-            #version 330 core
-            out vec4 FragColor;
-            uniform sampler2D screenTexture;
-            void main() {
-                FragColor = texture(screenTexture, gl_FragCoord.xy / vec2(800, 600));
-            }
-        )";
-            glShaderSource(_fragmentShader, 1, &shaderSource, NULL);
+            std::string shaderSource = loadShaderSource();
+            const char* shaderSourceCStr = shaderSource.c_str();
+            glShaderSource(_fragmentShader, 1, &shaderSourceCStr, NULL);
             glCompileShader(_fragmentShader);
 
             GLint success;
@@ -94,6 +128,7 @@ public:
             glUniform1i(_textureUniformInputLocation, 0); // Texture unit 0
 
             glUseProgram(0);
+            //delete shaderSource;
         }
     }
 };
@@ -130,7 +165,7 @@ void render() {
 
     glUseProgram(_injectedRenderContext._shaderProgram);
 
-    glEnable(GL_TEXTURE_2D);
+    //glEnable(GL_TEXTURE_2D);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, _injectedRenderContext._texture);
     glUniform1i(_injectedRenderContext._textureUniformInputLocation, 0); // Texture unit 0
@@ -143,8 +178,9 @@ void render() {
         glTexCoord2f(0.0f, 1.0f); glVertex2f(left, top);      // top left
     glEnd();
 
+
     glBindTexture(GL_TEXTURE_2D, 0);
-    glDisable(GL_TEXTURE_2D);
+    //glDisable(GL_TEXTURE_2D);
 
     glUseProgram(0);
 
