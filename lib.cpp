@@ -61,6 +61,9 @@ void render() {
     _injectedRenderContext.copyBackbufferToTexture();
 
     // Set up a simple orthographic projection for 2D rendering
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glPushMatrix();
+
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -69,9 +72,6 @@ void render() {
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
-
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, _injectedRenderContext._texture);
 
     // Set color to red
     glColor3f(1.0f, 0.0f, 0.0f);
