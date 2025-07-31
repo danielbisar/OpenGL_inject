@@ -1,3 +1,33 @@
+# OpenGL Inject
+
+This project demonstrates how to inject OpenGL rendering into existing applications using LD_PRELOAD. It allows you to modify the rendering pipeline of OpenGL applications without changing their source code.
+
+You can modify the fragment shader by editing the `fragment.shader` file.
+
+![OpenGL Inject](./images/screenshot.png)
+
+## Build and run
+
+To compile and run the project, use the provided script:
+
+```bash
+$ cd OpenGL_inject
+$ ./compile_and_run.sh
+```
+
+Required tools/libraries/packages:
+- `g++`
+- x11 development libraries
+- OpenGL development libraries
+- Xrandr development libraries
+- Xi development libraries
+- `ld` (linker)
+- mesa utils / glxgears
+
+The list might be incomplete.
+
+For now glxgears is the only tested application.
+
 # Benchmarks
 
 ## Without LD_PRELOAD
@@ -11,6 +41,8 @@ __GL_SYNC_TO_VBLANK=0 vblank_mode=0 glxgears
 ```
 
 ## With LD_PRELOAD
+
+### First version (no shader)
 
 ```bash
 ./compile_and_run.sh  # with gcc -fPIC -lglfw -lGL -lX11 -lpthread -lXrandr -lXi -ldl --shared -o ogl_inject.so lib.c
@@ -42,6 +74,33 @@ Try to load glUseProgram...
 146011 frames in 5.0 seconds = 29201.236 FPS
 ```
 
+### With shaders and -02
+
+```bash
+./compile_and_run.sh
+Load glAttachShader: 0x7fc86ba503c0
+Load glCreateProgram: 0x7fc86ba53580
+Load glCompileShader: 0x7fc86ba52840
+Load glCreateShader: 0x7fc86ba53660
+Load glGetProgramiv: 0x7fc86ba59040
+Load glGetProgramInfoLog: 0x7fc86ba58d20
+Load glGetShaderiv: 0x7fc86ba59540
+Load glGetShaderInfoLog: 0x7fc86ba594c0
+Load glGetUniformLocation: 0x7fc86ba59ea0
+Load glLinkProgram: 0x7fc86ba5bde0
+Load glShaderSource: 0x7fc86ba62f20
+Load glUniform1i: 0x7fc86ba65560
+Load glUseProgram: 0x7fc86ba665a0
+Load original glXSwapBuffers: 0x7fc86ba4ecb0
+Fragment shader created: 1
+Fragment shader compiled successfully.
+Creating texture with size 300x300
+103841 frames in 5.0 seconds = 20768.158 FPS
+105598 frames in 5.0 seconds = 21119.492 FPS
+105854 frames in 5.0 seconds = 21170.758 FPS
+105747 frames in 5.0 seconds = 21149.234 FPS
+```
+
 ## With LD_PRELOAD and -O2 optimization
 
 ```bash
@@ -63,3 +122,6 @@ Load glUseProgram: 0x7fd59db5e5a0
 143137 frames in 5.0 seconds = 28625.543 FPS
 Terminated
 ```
+
+# License
+This project is licensed under the MIT License. See the LICENSE file for details.

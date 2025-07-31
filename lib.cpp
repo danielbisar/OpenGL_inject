@@ -1,6 +1,6 @@
 // handles loading of OpenGL functions dynamically (assureGlFunctionsLoaded)
 
-// based on: https://aixxe.net/2016/12/imgui-linux-csgo
+// idea based on: https://aixxe.net/2016/12/imgui-linux-csgo
 
 #include "used_opengl_functions.h"
 
@@ -170,6 +170,7 @@ void render() {
     glBindTexture(GL_TEXTURE_2D, _injectedRenderContext._texture);
     glUniform1i(_injectedRenderContext._textureUniformInputLocation, 0); // Texture unit 0
 
+    // TODO possible performance improvement: use VBOs or VAOs for rendering
 
     glBegin(GL_QUADS);
         glTexCoord2f(0.0f, 0.0f); glVertex2f(left, bottom);   // bottom left
