@@ -41,3 +41,25 @@ Try to load glUseProgram...
 147036 frames in 5.0 seconds = 29407.119 FPS
 146011 frames in 5.0 seconds = 29201.236 FPS
 ```
+
+## With LD_PRELOAD and -O2 optimization
+
+```bash
+./compile_and_run.sh
+Load glAttachShader: 0x7fd59db483c0
+Load glCreateProgram: 0x7fd59db4b580
+Load glCompileShader: 0x7fd59db4a840
+Load glCreateShader: 0x7fd59db4b660
+Load glGetProgramiv: 0x7fd59db51040
+Load glGetProgramInfoLog: 0x7fd59db50d20
+Load glGetShaderiv: 0x7fd59db51540
+Load glGetShaderInfoLog: 0x7fd59db514c0
+Load glLinkProgram: 0x7fd59db53de0
+Load glShaderSource: 0x7fd59db5af20
+Load glUseProgram: 0x7fd59db5e5a0
+145307 frames in 5.0 seconds = 29061.289 FPS
+146380 frames in 5.0 seconds = 29275.883 FPS
+134868 frames in 5.0 seconds = 26973.420 FPS
+143137 frames in 5.0 seconds = 28625.543 FPS
+Terminated
+```

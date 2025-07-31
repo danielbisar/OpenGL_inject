@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+// handles loading of OpenGL functions dynamically (assureGlFunctionsLoaded)
 #include "used_opengl_functions.h"
 
 #include <stdio.h>
