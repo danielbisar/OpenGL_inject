@@ -1,0 +1,24 @@
+name: Linux build and GLX smoke checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ libgl-dev libx11-dev
+      - name: Build shared library
+        run: bash build.sh
+      - name: Install software-rendering test dependencies
+        run: sudo apt-get install -y --no-install-recommends xvfb xauth libgl1-mesa-dri
+      - name: Check GLX rendering and failure paths
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: xvfb-run -a -s "-screen 0 1024x768x24" timeout 90 bash tests/smoke.sh

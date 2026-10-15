@@ -1,1 +1,5 @@
 *.so
+/tests/glx_smoke
+*.o
+core
+core.*

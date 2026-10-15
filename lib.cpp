@@ -1,203 +1,348 @@
-// handles loading of OpenGL functions dynamically (assureGlFunctionsLoaded)
-
-// idea based on: https://aixxe.net/2016/12/imgui-linux-csgo
-
+// Experiment inspired by https://aixxe.net/2016/12/imgui-linux-csgo
 #include "used_opengl_functions.h"
 
-#include <stdio.h>
-#include <GL/gl.h>
 #include <GL/glx.h>
-#include <string>
+#include <array>
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <thread>
 
-class InjectedRenderContext {
-private:
-    std::string loadShaderSource() {
-        std::ifstream shaderFile("fragment.shader");
-        if (!shaderFile.is_open()) {
-            printf("Failed to open fragment shader file.\n");
-            return nullptr;
+namespace {
+
+constexpr GLfloat insetLeft = 0.7f;
+constexpr GLfloat insetBottom = 0.7f;
+constexpr GLfloat insetSize = 0.3f;
+constexpr std::array<GLenum, 10> disabledDuringInset = {
+    GL_DEPTH_TEST, GL_SCISSOR_TEST, GL_BLEND, GL_CULL_FACE, GL_STENCIL_TEST,
+    GL_ALPHA_TEST, GL_COLOR_LOGIC_OP, GL_LIGHTING, GL_FOG, GL_RASTERIZER_DISCARD
+};
+
+void reportOnce(bool& reported, const char* message) {
+    if (!reported) {
+        std::fprintf(stderr, "[OpenGL Inject] %s\n", message);
+        reported = true;
+    }
+}
+
+class SavedState {
+    const GlFunctions& gl;
+    GLint program, matrixMode, activeTexture, texture, sampler, unpackBuffer, readBuffer, drawBuffer;
+    GLint polygonMode[2];
+    GLfloat projection[16], modelview[16];
+    GLboolean colorMask[4];
+    std::array<GLboolean, disabledDuringInset.size()> enabled;
+
+public:
+    explicit SavedState(const GlFunctions& functions) : gl(functions) {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_MATRIX_MODE, &matrixMode);
+        glGetFloatv(GL_PROJECTION_MATRIX, projection);
+        glGetFloatv(GL_MODELVIEW_MATRIX, modelview);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+        glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
+        glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+        glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
+        glGetIntegerv(GL_POLYGON_MODE, polygonMode);
+        glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+        for (std::size_t i = 0; i < enabled.size(); ++i)
+            enabled[i] = glIsEnabled(disabledDuringInset[i]);
+    }
+
+    ~SavedState() {
+        gl.useProgram(program);
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(projection);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadMatrixf(modelview);
+        glMatrixMode(matrixMode);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        gl.bindSampler(0, sampler);
+        glActiveTexture(activeTexture);
+        gl.bindBuffer(GL_PIXEL_UNPACK_BUFFER, unpackBuffer);
+        glReadBuffer(readBuffer);
+        glDrawBuffer(drawBuffer);
+        glPolygonMode(GL_FRONT, polygonMode[0]);
+        glPolygonMode(GL_BACK, polygonMode[1]);
+        glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
+        for (std::size_t i = 0; i < enabled.size(); ++i) {
+            if (enabled[i]) glEnable(disabledDuringInset[i]);
+            else glDisable(disabledDuringInset[i]);
+        }
+    }
+
+    SavedState(const SavedState&) = delete;
+    SavedState& operator=(const SavedState&) = delete;
+};
+
+std::optional<std::string> loadShaderSource() {
+    const char* configured = std::getenv("OGL_INJECT_SHADER");
+    std::filesystem::path path;
+    if (configured) {
+        path = configured;
+        if (!path.is_absolute()) {
+            std::fprintf(stderr, "[OpenGL Inject] OGL_INJECT_SHADER must be an absolute path.\n");
+            return std::nullopt;
+        }
+    } else {
+        static int libraryAnchor;
+        Dl_info info{};
+        if (!dladdr(&libraryAnchor, &info) || !info.dli_fname) {
+            std::fprintf(stderr, "[OpenGL Inject] Cannot locate library; set OGL_INJECT_SHADER.\n");
+            return std::nullopt;
+        }
+        path = info.dli_fname;
+        if (!path.is_absolute()) {
+            std::fprintf(stderr, "[OpenGL Inject] Use an absolute LD_PRELOAD or OGL_INJECT_SHADER path.\n");
+            return std::nullopt;
+        }
+        path = path.parent_path() / "fragment.shader";
+    }
+    std::ifstream file(path);
+    if (!file) {
+        std::fprintf(stderr, "[OpenGL Inject] Cannot open shader: %s\n", path.c_str());
+        return std::nullopt;
+    }
+    std::ostringstream source;
+    source << file.rdbuf();
+    if (file.bad()) {
+        std::fprintf(stderr, "[OpenGL Inject] Cannot read shader: %s\n", path.c_str());
+        return std::nullopt;
+    }
+    return source.str();
+}
+
+struct InjectedRenderContext {
+    GLXContext context = nullptr;
+    std::thread::id thread;
+    GLuint texture = 0, program = 0;
+    GLint samplerLocation = -1, viewportLocation = -1, insetLocation = -1;
+    GLint width = 0, height = 0;
+    bool failed = false, unsupportedReported = false, framebufferReported = false;
+
+    bool createProgram(const GlFunctions& gl) {
+        const auto source = loadShaderSource();
+        if (!source) return false;
+        GLuint shader = gl.createShader(GL_FRAGMENT_SHADER);
+        if (!shader) {
+            std::fprintf(stderr, "[OpenGL Inject] Cannot create fragment shader.\n");
+            return false;
+        }
+        const char* text = source->c_str();
+        gl.shaderSource(shader, 1, &text, nullptr);
+        gl.compileShader(shader);
+        GLint success = GL_FALSE;
+        gl.getShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            char log[4096]{};
+            gl.getShaderInfoLog(shader, sizeof(log), nullptr, log);
+            std::fprintf(stderr, "[OpenGL Inject] Fragment shader compilation failed:\n%s\n", log);
+            gl.deleteShader(shader);
+            return false;
+        }
+        program = gl.createProgram();
+        if (program) {
+            gl.attachShader(program, shader);
+            gl.linkProgram(program);
+            gl.getProgramiv(program, GL_LINK_STATUS, &success);
+        } else {
+            success = GL_FALSE;
+        }
+        gl.deleteShader(shader);
+        if (!success) {
+            char log[4096]{};
+            if (program) gl.getProgramInfoLog(program, sizeof(log), nullptr, log);
+            std::fprintf(stderr, "[OpenGL Inject] Shader program creation/link failed:\n%s\n", log);
+            if (program) gl.deleteProgram(program);
+            program = 0;
+            return false;
+        }
+        samplerLocation = gl.getUniformLocation(program, "screenTexture");
+        viewportLocation = gl.getUniformLocation(program, "captureViewport");
+        insetLocation = gl.getUniformLocation(program, "insetBounds");
+        std::fprintf(stderr, "[OpenGL Inject] Shader program ready.\n");
+        return true;
+    }
+
+    void render(const GlFunctions& gl, Display* display, GLXDrawable drawable) {
+        if (failed) return;
+        GLint readFramebuffer, drawFramebuffer, viewport[4], maxTextureSize;
+        GLboolean doubleBuffered, stereo;
+        GLint sampleBuffers;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer);
+        glGetBooleanv(GL_DOUBLEBUFFER, &doubleBuffered);
+        glGetBooleanv(GL_STEREO, &stereo);
+        glGetIntegerv(GL_SAMPLE_BUFFERS, &sampleBuffers);
+        if (readFramebuffer || drawFramebuffer || !doubleBuffered || stereo || sampleBuffers) {
+            reportOnce(framebufferReported,
+                       "Skipping unsupported framebuffer (requires default, double-buffered, mono, non-MSAA).");
+            return;
+        }
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
+        unsigned drawableWidth = 0, drawableHeight = 0;
+        glXQueryDrawable(display, drawable, GLX_WIDTH, &drawableWidth);
+        glXQueryDrawable(display, drawable, GLX_HEIGHT, &drawableHeight);
+        if (viewport[0] < 0 || viewport[1] < 0 || viewport[2] <= 0 || viewport[3] <= 0 ||
+            viewport[2] > maxTextureSize || viewport[3] > maxTextureSize ||
+            static_cast<unsigned>(viewport[0]) + viewport[2] > drawableWidth ||
+            static_cast<unsigned>(viewport[1]) + viewport[3] > drawableHeight) {
+            reportOnce(framebufferReported, "Skipping viewport outside drawable/texture bounds (including resize transitions).");
+            return;
         }
 
-        std::ostringstream buffer;
-        buffer << shaderFile.rdbuf(); // Read the file's content into the buffer
-        std::string shaderCode = buffer.str(); // Convert buffer to string
-        shaderFile.close();
-
-        return shaderCode;
-    }
-public:
-    int viewportWidth = 0;
-    int viewportHeight = 0;
-    int textureWidth = 0;
-    int textureHeight = 0;
-    GLuint _texture = 0;
-    GLuint _fragmentShader = 0;
-    GLuint _shaderProgram = 0;
-    GLint _textureUniformInputLocation = 0;
-    clock_t _lastTextureUpdate = 0;
-
-    InjectedRenderContext(){
-    }
-
-    void readViewportInfos(){
-        GLint viewport[4];
-        glGetIntegerv(GL_VIEWPORT, viewport);
-
-        viewportWidth = viewport[2];
-        viewportHeight = viewport[3];
-    }
-
-    void assureTexture() {
-        if (_texture == 0 || textureWidth != viewportWidth || textureHeight != viewportHeight) {
-
-            // reduce the frequency of texture updates
-            // to avoid performance issues with frequent texture recreation (complete hangs)
-            if(_lastTextureUpdate == 0)
-                _lastTextureUpdate = clock();
-            else if (clock() - _lastTextureUpdate < CLOCKS_PER_SEC / 2) {
-                //printf("Skipping texture update, last update was too recent.\n");
+        SavedState saved(gl);
+        if (!program && !createProgram(gl)) {
+            failed = true;
+            std::fprintf(stderr, "[OpenGL Inject] Injection disabled for this context; swaps continue.\n");
+            return;
+        }
+        if (!texture) {
+            glGenTextures(1, &texture);
+            if (!texture) {
+                failed = true;
+                std::fprintf(stderr, "[OpenGL Inject] Cannot create capture texture; injection disabled.\n");
                 return;
             }
-
-            _lastTextureUpdate = clock();
-
-            if(_texture != 0) {
-                glBindTexture(GL_TEXTURE_2D, 0);
-                glDeleteTextures(1, &_texture);
-            }
-
-            printf("Creating texture with size %dx%d\n", viewportWidth, viewportHeight);
-
-            glGenTextures(1, &_texture);
-            glBindTexture(GL_TEXTURE_2D, _texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, viewportWidth, viewportHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
-
-            textureWidth = viewportWidth;
-            textureHeight = viewportHeight;
-
-            glBindTexture(GL_TEXTURE_2D, 0);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         }
-    }
-
-    void saveOpenGlState() {
-        glPushAttrib(GL_ALL_ATTRIB_BITS);
-        glPushMatrix();
-    }
-
-    void restoreOpenGlState() {
-        glPopMatrix();
-        glPopAttrib();
-    }
-
-    void copyBackbufferToTexture() {
-        glBindTexture(GL_TEXTURE_2D, _texture);
-        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 0, 0, viewportWidth, viewportHeight, 0);
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-
-    void assureShader() {
-        if(_shaderProgram == 0)
-        {
-            _fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-            printf("Fragment shader created: %u\n", _fragmentShader);
-
-            std::string shaderSource = loadShaderSource();
-            const char* shaderSourceCStr = shaderSource.c_str();
-            glShaderSource(_fragmentShader, 1, &shaderSourceCStr, NULL);
-            glCompileShader(_fragmentShader);
-
-            GLint success;
-            glGetShaderiv(_fragmentShader, GL_COMPILE_STATUS, &success);
-            if (!success) {
-                GLchar infoLog[512];
-                glGetShaderInfoLog(_fragmentShader, 512, NULL, infoLog);
-                printf("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n%s\n", infoLog);
-            } else {
-                printf("Fragment shader compiled successfully.\n");
+        glBindTexture(GL_TEXTURE_2D, texture);
+        gl.bindSampler(0, 0);
+        if (width != viewport[2] || height != viewport[3]) {
+            gl.bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, viewport[2], viewport[3],
+                         0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+            if (width != viewport[2] || height != viewport[3]) {
+                failed = true;
+                std::fprintf(stderr, "[OpenGL Inject] Texture allocation failed; injection disabled.\n");
+                return;
             }
-
-            _shaderProgram = glCreateProgram();
-            glAttachShader(_shaderProgram, _fragmentShader);
-            glLinkProgram(_shaderProgram);
-
-            _textureUniformInputLocation = glGetUniformLocation(_shaderProgram, "screenTexture");
-            glUniform1i(_textureUniformInputLocation, 0); // Texture unit 0
-
-            glUseProgram(0);
-            //delete shaderSource;
         }
+        glReadBuffer(GL_BACK);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, viewport[0], viewport[1], width, height);
+        glDrawBuffer(GL_BACK);
+        for (GLenum capability : disabledDuringInset) glDisable(capability);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glOrtho(0, 1, 0, 1, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        gl.useProgram(program);
+        gl.uniform1i(samplerLocation, 0);
+        gl.uniform4f(viewportLocation, viewport[0], viewport[1], width, height);
+        gl.uniform4f(insetLocation, insetLeft, insetBottom, insetSize, insetSize);
+        glBegin(GL_QUADS);
+        glVertex2f(insetLeft, insetBottom);
+        glVertex2f(insetLeft + insetSize, insetBottom);
+        glVertex2f(insetLeft + insetSize, insetBottom + insetSize);
+        glVertex2f(insetLeft, insetBottom + insetSize);
+        glEnd();
     }
 };
 
-static InjectedRenderContext _injectedRenderContext = InjectedRenderContext();
-
-float left = 0.7f;   // right edge minus quad width
-float right = 1.0f;  // at the very right
-float bottom = 0.7f; // top edge minus quad height
-float top = 1.0f;    // at the very top
-
-void render() {
-    _injectedRenderContext.readViewportInfos();
-    _injectedRenderContext.saveOpenGlState();
-    _injectedRenderContext.assureShader();
-
-    _injectedRenderContext.assureTexture();
-    _injectedRenderContext.copyBackbufferToTexture();
-
-    // Set up a simple orthographic projection for 2D rendering
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    glOrtho(0, 1, 0, 1, -1, 1);
-
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadIdentity();
-
-    glDisable(GL_LIGHTING);
-    glDisable(GL_COLOR_MATERIAL);
-    glDisable(GL_BLEND);       // optional, if blending is undesired
-    glColor4f(1.0f, 1.0f, 1.0f, 1.0f); // ensure full texture color
-
-    glUseProgram(_injectedRenderContext._shaderProgram);
-
-    //glEnable(GL_TEXTURE_2D);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, _injectedRenderContext._texture);
-    glUniform1i(_injectedRenderContext._textureUniformInputLocation, 0); // Texture unit 0
-
-    // TODO possible performance improvement: use VBOs or VAOs for rendering
-
-    glBegin(GL_QUADS);
-        glTexCoord2f(0.0f, 0.0f); glVertex2f(left, bottom);   // bottom left
-        glTexCoord2f(1.0f, 0.0f); glVertex2f(right, bottom);  // bottom right
-        glTexCoord2f(1.0f, 1.0f); glVertex2f(right, top);     // top right
-        glTexCoord2f(0.0f, 1.0f); glVertex2f(left, top);      // top left
-    glEnd();
-
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    //glDisable(GL_TEXTURE_2D);
-
-    glUseProgram(0);
-
-    // Restore matrices and state
-    glPopMatrix(); // MODELVIEW
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-
-    _injectedRenderContext.restoreOpenGlState();
+const GlFunctions& glFunctions() {
+    static const GlFunctions gl;
+    return gl;
 }
 
-void glXSwapBuffers(Display* display, GLXDrawable drawable) {
+std::mutex renderMutex;
+InjectedRenderContext injected;
 
-    assureGlFunctionsLoaded();
-    render();
+void tryRender(Display* display, GLXDrawable drawable) {
+    std::unique_lock<std::mutex> lock(renderMutex, std::try_to_lock);
+    if (!lock) return;
+    GLXContext current = glXGetCurrentContext();
+    if (!current || display != glXGetCurrentDisplay() ||
+        drawable != glXGetCurrentDrawable() || drawable != glXGetCurrentReadDrawable()) {
+        reportOnce(injected.unsupportedReported, "Skipping swap without matching current GLX context/drawables.");
+        return;
+    }
+    if (injected.context &&
+        (injected.context != current || injected.thread != std::this_thread::get_id())) {
+        reportOnce(injected.unsupportedReported, "Skipping additional context or rendering thread.");
+        return;
+    }
+    if (!injected.context) {
+        int major = 0, minor = 0;
+        const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+        if (!version || std::sscanf(version, "%d.%d", &major, &minor) != 2 ||
+            major < 3 || (major == 3 && minor < 3)) {
+            reportOnce(injected.unsupportedReported, "Requires desktop OpenGL 3.3+ compatibility profile.");
+            return;
+        }
+        GLint profile;
+        glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
+        if (!(profile & GL_CONTEXT_COMPATIBILITY_PROFILE_BIT)) {
+            reportOnce(injected.unsupportedReported, "Core-profile contexts are not supported.");
+            return;
+        }
+        injected.context = current;
+        injected.thread = std::this_thread::get_id();
+    }
+    const auto& gl = glFunctions();
+    if (!gl.ready) return;
+    try {
+        injected.render(gl, display, drawable);
+    } catch (const std::exception& error) {
+        injected.failed = true;
+        std::fprintf(stderr, "[OpenGL Inject] Injection disabled after exception: %s\n", error.what());
+    }
+}
 
-    glXSwapBuffers_original(display, drawable);
+} // namespace
+
+extern "C" void glXSwapBuffers(Display* display, GLXDrawable drawable) {
+    using Swap = void (*)(Display*, GLXDrawable);
+    static const Swap original = [] {
+        Swap function = nullptr;
+        if (!loadNextSymbol(function, "glXSwapBuffers"))
+            std::fprintf(stderr, "[OpenGL Inject] Real glXSwapBuffers unavailable; cannot forward swap.\n");
+        return function;
+    }();
+    if (!original) return;
+    tryRender(display, drawable);
+    original(display, drawable);
+}
+
+extern "C" void glXDestroyContext(Display* display, GLXContext context) {
+    using Destroy = void (*)(Display*, GLXContext);
+    static const Destroy original = [] {
+        Destroy function = nullptr;
+        if (!loadNextSymbol(function, "glXDestroyContext"))
+            std::fprintf(stderr, "[OpenGL Inject] Real glXDestroyContext unavailable; cannot forward destruction.\n");
+        return function;
+    }();
+    if (!original) return;
+    {
+        std::lock_guard<std::mutex> lock(renderMutex);
+        if (context && injected.context == context) {
+            // GL deletion is only legal while this context is current.
+            if (glXGetCurrentContext() == context) {
+                const auto& gl = glFunctions();
+                if (gl.ready) {
+                    if (injected.texture) glDeleteTextures(1, &injected.texture);
+                    if (injected.program) gl.deleteProgram(injected.program);
+                }
+            }
+            injected = InjectedRenderContext{};
+        }
+    }
+    original(display, context);
 }
